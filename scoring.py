@@ -304,26 +304,36 @@ def sensitivity_analysis(
     """
     Show how rankings change as one weight goes from 0 to 1.
 
-    Returns a DataFrame with columns: weight_value, rotation_name, total_score.
+    Returns a DataFrame with columns: weight_value, rotation, total_score.
     """
+    # Sub-scores depend only on climate and crop traits, not weights; compute once per rotation.
+    w_base = base_weights if sum(base_weights.values()) > 0 else DEFAULT_WEIGHTS
+    precomputed = {}
+    for rot in rotations.values():
+        res = score_rotation(rot, df, w_base)
+        precomputed[rot.name] = {k: score for k, (score, _) in res["sub_scores"].items()}
+
     rows = []
+    others_sum = sum(v for k, v in base_weights.items() if k != vary_key)
     for i in range(steps):
         test_w = base_weights.copy()
         val = i / (steps - 1)
         test_w[vary_key] = val
         # Reduce others proportionally
-        others_sum = sum(v for k, v in base_weights.items() if k != vary_key)
         if others_sum > 0:
             for k in test_w:
                 if k != vary_key:
                     test_w[k] = base_weights[k] / others_sum * (1 - val)
 
-        for key, rot in rotations.items():
-            result = score_rotation(rot, df, test_w)
+        w_sum = sum(test_w.values())
+        w_norm = {k: v / w_sum for k, v in test_w.items()} if w_sum > 0 else DEFAULT_WEIGHTS
+
+        for rot_name, sub_scores in precomputed.items():
+            total = sum(w_norm[k] * sub_scores[k] for k in w_norm)
             rows.append({
                 "weight_value": round(val, 2),
-                "rotation": result["rotation_name"],
-                "total_score": result["total_score"],
+                "rotation": rot_name,
+                "total_score": round(float(total), 1),
             })
 
     return pd.DataFrame(rows)

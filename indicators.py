@@ -21,33 +21,36 @@ def growing_season_length(df: pd.DataFrame, temp_threshold: float = 10.0) -> pd.
 
     Returns DataFrame with columns: year, growing_days.
     """
-    yearly = df.groupby(df.index.year).apply(
-        lambda g: (g["T2M"] >= temp_threshold).sum()
-    ).reset_index()
-    yearly.columns = ["year", "growing_days"]
-    return yearly
+    return (
+        (df["T2M"] >= temp_threshold)
+        .groupby(df.index.year.rename("year"))
+        .sum()
+        .reset_index(name="growing_days")
+    )
 
 
 def frost_risk(df: pd.DataFrame, threshold: float = 2.0) -> pd.DataFrame:
     """
     Days per year with T2M_MIN below a threshold (frost / cold damage risk).
     """
-    yearly = df.groupby(df.index.year).apply(
-        lambda g: (g["T2M_MIN"] <= threshold).sum()
-    ).reset_index()
-    yearly.columns = ["year", "frost_days"]
-    return yearly
+    return (
+        (df["T2M_MIN"] <= threshold)
+        .groupby(df.index.year.rename("year"))
+        .sum()
+        .reset_index(name="frost_days")
+    )
 
 
 def heat_stress(df: pd.DataFrame, threshold: float = 35.0) -> pd.DataFrame:
     """
     Days per year with T2M_MAX above a crop's heat-stress threshold.
     """
-    yearly = df.groupby(df.index.year).apply(
-        lambda g: (g["T2M_MAX"] >= threshold).sum()
-    ).reset_index()
-    yearly.columns = ["year", "heat_stress_days"]
-    return yearly
+    return (
+        (df["T2M_MAX"] >= threshold)
+        .groupby(df.index.year.rename("year"))
+        .sum()
+        .reset_index(name="heat_stress_days")
+    )
 
 
 def monthly_water_balance(df: pd.DataFrame) -> pd.DataFrame:
@@ -56,26 +59,36 @@ def monthly_water_balance(df: pd.DataFrame) -> pd.DataFrame:
 
     Positive = surplus; negative = deficit.
     """
-    monthly = df.groupby([df.index.year, df.index.month]).agg(
+    monthly = df.groupby(
+        [df.index.year.rename("year"), df.index.month.rename("month")]
+    ).agg(
         rain_mm=("PRECTOTCORR", "sum"),
         evap_mm=("EVLAND", "sum"),
     ).reset_index()
-    monthly.columns = ["year", "month", "rain_mm", "evap_mm"]
     monthly["water_balance_mm"] = monthly["rain_mm"] - monthly["evap_mm"]
     return monthly
+
+
+def _max_dry_run(is_dry: np.ndarray) -> int:
+    """Longest consecutive True run in a 1D boolean array."""
+    if len(is_dry) == 0 or not is_dry.any():
+        return 0
+    padded = np.concatenate(([False], is_dry, [False]))
+    diffs = np.diff(padded.astype(np.int8))
+    starts = np.flatnonzero(diffs == 1)
+    ends = np.flatnonzero(diffs == -1)
+    return int((ends - starts).max())
 
 
 def dry_spell_analysis(df: pd.DataFrame, threshold_mm: float = 1.0) -> pd.DataFrame:
     """
     Longest consecutive dry-day run per year (rain < threshold).
     """
-    results = []
-    for year, group in df.groupby(df.index.year):
-        is_dry = (group["PRECTOTCORR"] < threshold_mm).astype(int)
-        # Find runs
-        runs = is_dry.groupby((is_dry != is_dry.shift()).cumsum())
-        max_run = max((run.sum() for _, run in runs), default=0)
-        results.append({"year": year, "max_dry_spell_days": int(max_run)})
+    dry_series = df["PRECTOTCORR"] < threshold_mm
+    results = [
+        {"year": year, "max_dry_spell_days": _max_dry_run(group.to_numpy())}
+        for year, group in dry_series.groupby(df.index.year.rename("year"))
+    ]
     return pd.DataFrame(results)
 
 
@@ -84,17 +97,16 @@ def soil_wetness_seasonal(df: pd.DataFrame) -> pd.DataFrame:
     Monthly average root-zone soil wetness (GWETROOT) and anomaly vs. long-term mean.
     """
     # Monthly means
-    monthly = df.groupby([df.index.year, df.index.month]).agg(
+    monthly = df.groupby(
+        [df.index.year.rename("year"), df.index.month.rename("month")]
+    ).agg(
         gwetroot_mean=("GWETROOT", "mean"),
         gwettop_mean=("GWETTOP", "mean"),
     ).reset_index()
-    monthly.columns = ["year", "month", "gwetroot_mean", "gwettop_mean"]
 
     # Long-term monthly mean for anomaly
-    lt_mean = monthly.groupby("month")["gwetroot_mean"].mean()
-    monthly["gwetroot_anomaly"] = monthly.apply(
-        lambda r: r["gwetroot_mean"] - lt_mean[r["month"]], axis=1
-    )
+    lt_mean = monthly.groupby("month")["gwetroot_mean"].transform("mean")
+    monthly["gwetroot_anomaly"] = monthly["gwetroot_mean"] - lt_mean
     return monthly
 
 
@@ -116,10 +128,11 @@ def bare_field_erosion_risk(
     DataFrame with bare-month rainfall and risk flag.
     """
     bare = set(range(1, 13)) - set(covered_months)
-    monthly = df.groupby([df.index.year, df.index.month]).agg(
+    monthly = df.groupby(
+        [df.index.year.rename("year"), df.index.month.rename("month")]
+    ).agg(
         rain_mm=("PRECTOTCORR", "sum"),
     ).reset_index()
-    monthly.columns = ["year", "month", "rain_mm"]
     monthly["is_bare"] = monthly["month"].isin(bare)
     monthly["erosion_risk"] = monthly["is_bare"] & (monthly["rain_mm"] > 100)
     return monthly
@@ -151,11 +164,11 @@ def linear_trend(series: pd.Series) -> Dict:
         interp = f"No significant trend (p={p:.2f})"
 
     return {
-        "slope_per_year": slope,
-        "intercept": intercept,
-        "slope_per_decade": per_decade,
-        "p_value": p,
-        "r_squared": r**2,
+        "slope_per_year": float(slope),
+        "intercept": float(intercept),
+        "slope_per_decade": float(per_decade),
+        "p_value": float(p),
+        "r_squared": float(r**2),
         "interpretation": interp,
     }
 
@@ -172,10 +185,10 @@ def mann_kendall_trend(series: pd.Series) -> Dict:
             return {"interpretation": "Insufficient data for Mann-Kendall"}
         result = mk.original_test(y)
         return {
-            "trend": result.trend,
-            "p_value": result.p,
-            "tau": result.Tau,
-            "slope_sen": result.slope,
+            "trend": str(result.trend),
+            "p_value": float(result.p),
+            "tau": float(result.Tau),
+            "slope_sen": float(result.slope),
             "interpretation": (
                 f"{result.trend.capitalize()} (τ={result.Tau:.3f}, "
                 f"Sen's slope={result.slope:.4f}, p={result.p:.3f})"
@@ -246,14 +259,12 @@ def crop_climate_fit(
 
     # --- Dry spell risk ---
     # Compute max dry spell within season months per year
-    dry_spells = []
-    for year, group in season_df.groupby(season_year):
-        is_dry = (group["PRECTOTCORR"] < 1.0).astype(int)
-        if len(is_dry) > 0:
-            runs = is_dry.groupby((is_dry != is_dry.shift()).cumsum())
-            max_run = max((r.sum() for _, r in runs), default=0)
-            dry_spells.append(max_run)
-    avg_dry = np.mean(dry_spells) if dry_spells else 0
+    dry_mask = season_df["PRECTOTCORR"] < 1.0
+    dry_spells = [
+        _max_dry_run(group.to_numpy())
+        for _, group in dry_mask.groupby(season_year)
+    ]
+    avg_dry = float(np.mean(dry_spells)) if dry_spells else 0.0
 
     if crop_traits.drought_tolerance == "high":
         dry_penalty = max(0, (avg_dry - 20) * 1.5)

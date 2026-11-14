@@ -440,7 +440,7 @@ with tab_scoring:
     ))
 
     # Comparison table
-    ranking_df = compare_rotations(ROTATIONS, df, weights)
+    ranking_df = compare_rotations(ROTATIONS, df, weights_norm)
     st.dataframe(
         ranking_df,
         use_container_width=True,
@@ -451,13 +451,18 @@ with tab_scoring:
         },
     )
 
+    rot_results = {
+        key: score_rotation(rot, df, weights_norm)
+        for key, rot in ROTATIONS.items()
+    }
+
     # Radar chart for top rotations
     st.markdown("#### Sub-score Comparison")
     categories = list(WEIGHT_LABELS.values())
 
     fig_radar = go.Figure()
     for key, rot in ROTATIONS.items():
-        result = score_rotation(rot, df, weights)
+        result = rot_results[key]
         values = [result["sub_scores"][k][0] for k in WEIGHT_LABELS]
         values.append(values[0])  # close the polygon
         fig_radar.add_trace(go.Scatterpolar(
@@ -477,7 +482,7 @@ with tab_scoring:
     # Detailed evidence for each rotation
     st.markdown("#### 📋 Evidence & Explanation")
     for key, rot in ROTATIONS.items():
-        result = score_rotation(rot, df, weights)
+        result = rot_results[key]
         with st.expander(f"{rot.name} — Score: {result['total_score']:.1f}/100"):
             for ev_line in result["evidence"]:
                 st.markdown(f"- {ev_line}")
@@ -504,7 +509,7 @@ with tab_sensitivity:
         format_func=lambda k: WEIGHT_LABELS[k],
     )
 
-    sens_df = sensitivity_analysis(ROTATIONS, df, weights, vary, steps=11)
+    sens_df = sensitivity_analysis(ROTATIONS, df, weights_norm, vary, steps=11)
 
     fig_sens = px.line(
         sens_df, x="weight_value", y="total_score", color="rotation",
@@ -520,8 +525,7 @@ with tab_sensitivity:
     st.plotly_chart(fig_sens, use_container_width=True)
 
     # Confidence note
-    current_scores = compare_rotations(ROTATIONS, df, weights)
-    scores_sorted = current_scores["Total Score"].values
+    scores_sorted = ranking_df["Total Score"].values
     if len(scores_sorted) >= 2:
         gap = scores_sorted[0] - scores_sorted[1]
         if gap < 5:
