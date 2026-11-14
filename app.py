@@ -15,7 +15,10 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from power_api import fetch_power_data, get_location_info, DEMO_LOCATIONS
-from crops import CROP_DB, ROTATIONS, get_crop_table_df, Rotation, RotationSlot
+from crops import (
+    CROP_DB, ROTATIONS, get_crop_table_df,
+    Rotation, RotationSlot, generate_rotation_combinations,
+)
 from indicators import (
     growing_season_length, frost_risk, heat_stress,
     monthly_water_balance, dry_spell_analysis,
@@ -89,17 +92,45 @@ rain_factor = 1 + rain_pct / 100
 # ---------------------------------------------------------------------------
 # Sidebar — Priority Weights
 # ---------------------------------------------------------------------------
+WEIGHT_PRESETS = {
+    "⚖️ Balanced": DEFAULT_WEIGHTS,
+    "💧 Water Crisis": {"climate_fit": 0.25, "water_saving": 0.45, "soil_health": 0.15, "pest_break": 0.05, "income": 0.10},
+    "🌱 Soil Health": {"climate_fit": 0.20, "water_saving": 0.15, "soil_health": 0.40, "pest_break": 0.15, "income": 0.10},
+    "💰 Max Income": {"climate_fit": 0.20, "water_saving": 0.10, "soil_health": 0.10, "pest_break": 0.10, "income": 0.50},
+    "🛡️ Climate Safe": {"climate_fit": 0.45, "water_saving": 0.25, "soil_health": 0.15, "pest_break": 0.10, "income": 0.05},
+}
+
+
+def _apply_weight_preset(preset: dict):
+    for k, v in preset.items():
+        st.session_state[f"w_{k}"] = float(v)
+
+
+for key in WEIGHT_LABELS:
+    if f"w_{key}" not in st.session_state:
+        st.session_state[f"w_{key}"] = float(DEFAULT_WEIGHTS[key])
+
 st.sidebar.markdown("---")
 st.sidebar.markdown("### ⚖️ Your Priorities")
-st.sidebar.caption("Drag the sliders to reflect what matters most to you. The tool re-ranks rotations in real time.")
+st.sidebar.caption("Pick a quick preset or drag sliders to re-rank rotations live.")
+
+preset_cols = st.sidebar.columns(2)
+for idx, (p_label, p_weights) in enumerate(WEIGHT_PRESETS.items()):
+    preset_cols[idx % 2].button(
+        p_label,
+        key=f"preset_{idx}",
+        on_click=_apply_weight_preset,
+        args=(p_weights,),
+        use_container_width=True,
+    )
 
 weights = {}
 for key, label in WEIGHT_LABELS.items():
     weights[key] = st.sidebar.slider(
         label,
-        0.0, 1.0,
-        DEFAULT_WEIGHTS[key],
-        0.05,
+        min_value=0.0,
+        max_value=1.0,
+        step=0.05,
         key=f"w_{key}",
     )
 
@@ -366,6 +397,15 @@ with tab_rotations:
     st.markdown("#### 🌿 Crop Trait Reference Table")
     st.dataframe(get_crop_table_df(), use_container_width=True, hide_index=True)
 
+    with st.expander("🔬 Fact-Check & Agronomic Sources"):
+        st.markdown("""
+        Trait thresholds were checked against **FAO Irrigation & Drainage Papers 24 & 56**, **FAO EcoCrop**, **IRRI**, and **WorldVeg** guidelines:
+        - **Rice heat stress (35 °C):** IRRI identifies 35 °C daily max at flowering (anthesis) as the critical threshold for spikelet sterility (not 40 °C).
+        - **Field water vs. crop ETc:** Rice crop evapotranspiration ($ET_c$) is ~500–700 mm, while total field water requirement including land puddling and percolation reaches **800–1,300 mm**. Upland seasonal crop water needs align with FAO 24/56: Maize 500–800 mm, Soybean 450–700 mm, Peanut 500–700 mm, Sweet Potato 400–675 mm.
+        - **Mung bean base temperature & roots:** Chilling-sensitive tropical legume (`temp_min` ~15 °C, not 10 °C) with a **medium** taproot (0.5–1.0 m), consistent with high drought tolerance.
+        - **Botanical family classification:** Leafy vegetables are modeled specifically as **Leafy Brassicas (*Brassicaceae*)** rather than a generic mixed label so pest-cycle break scoring reflects real family diversity.
+        """)
+
     st.markdown("---")
     st.markdown("#### 🔄 Rotation Calendars")
 
@@ -432,65 +472,343 @@ with tab_rotations:
 # TAB 4: Scoring & Ranking
 # ---------------------------------------------------------------------------
 with tab_scoring:
-    st.subheader("🏆 Rotation Ranking")
+    st.subheader("🏆 Interactive Rotation Ranking")
 
     # Current weights display
     st.caption("Weights (from sidebar sliders): " + " | ".join(
         f"{WEIGHT_LABELS[k]}: {weights_norm[k]:.0%}" for k in WEIGHT_LABELS
     ))
 
-    # Comparison table
-    ranking_df = compare_rotations(ROTATIONS, df, weights_norm)
-    st.dataframe(
-        ranking_df,
-        use_container_width=True,
-        column_config={
-            "Total Score": st.column_config.ProgressColumn(
-                "Total Score", min_value=0, max_value=100, format="%.1f"
-            ),
-        },
+    # --- Combination pool controls ---
+    if "custom_rotations" not in st.session_state:
+        st.session_state["custom_rotations"] = {}
+
+    st.markdown("#### 🧩 Combination Pool")
+    pcol1, pcol2 = st.columns(2)
+    include_curated = pcol1.checkbox(
+        f"Include {len(ROTATIONS)} curated rotations",
+        value=True,
+        key="pool_curated",
+    )
+    include_autogen = pcol2.checkbox(
+        "Auto-generate 2-crop & 3-crop combinations",
+        value=True,
+        key="pool_autogen",
     )
 
-    rot_results = {
-        key: score_rotation(rot, df, weights_norm)
-        for key, rot in ROTATIONS.items()
-    }
+    autogen_rotations = {}
+    if include_autogen:
+        with st.expander("⚙️ Configure Auto-Generated Crop Combinations", expanded=False):
+            g_t1, g_t2 = st.columns(2)
+            gen_2crop = g_t1.checkbox("Include 2-crop combos (Wet + Dry)", value=True, key="gen_2crop")
+            gen_3crop = g_t2.checkbox("Include 3-crop combos (Wet + Gap + Dry)", value=True, key="gen_3crop")
 
-    # Radar chart for top rotations
-    st.markdown("#### Sub-score Comparison")
-    categories = list(WEIGHT_LABELS.values())
+            c_wet, c_gap, c_dry = st.columns(3)
+            all_crop_keys = list(CROP_DB.keys())
+            wet_choices = c_wet.multiselect(
+                "Wet season (Jun–Oct / Jun–Sep)",
+                all_crop_keys,
+                default=["rice"],
+                format_func=lambda k: CROP_DB[k].name,
+                key="gen_wet",
+            )
+            gap_choices = c_gap.multiselect(
+                "Cool / Gap slot (Oct–Dec, 3-crop)",
+                all_crop_keys,
+                default=["soybean", "mung_bean", "sweet_potato", "vegetables"],
+                format_func=lambda k: CROP_DB[k].name,
+                key="gen_gap",
+            )
+            dry_choices = c_dry.multiselect(
+                "Dry season (Jan–Apr / Dec–Mar)",
+                all_crop_keys,
+                default=["rice_dry", "maize", "mung_bean", "peanut", "vegetables"],
+                format_func=lambda k: CROP_DB[k].name,
+                key="gen_dry",
+            )
+            autogen_rotations = generate_rotation_combinations(
+                wet_choices, gap_choices, dry_choices,
+                include_2crop=gen_2crop,
+                include_3crop=gen_3crop,
+            )
 
-    fig_radar = go.Figure()
-    for key, rot in ROTATIONS.items():
-        result = rot_results[key]
-        values = [result["sub_scores"][k][0] for k in WEIGHT_LABELS]
-        values.append(values[0])  # close the polygon
-        fig_radar.add_trace(go.Scatterpolar(
-            r=values,
-            theta=categories + [categories[0]],
-            name=rot.name,
-            fill="toself",
-            opacity=0.6,
-        ))
-    fig_radar.update_layout(
-        polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
-        height=450, template="plotly_white",
-        title="Rotation Sub-scores (0–100)",
-    )
-    st.plotly_chart(fig_radar, use_container_width=True)
+    # --- Custom rotation builder ---
+    with st.expander("➕ Custom Rotation Builder", expanded=False):
+        n_custom_slots = st.radio(
+            "Number of crops per year",
+            [2, 3],
+            horizontal=True,
+            key="cust_n_slots",
+        )
+        custom_name_input = st.text_input(
+            "Rotation name (leave blank to auto-name)",
+            key="cust_name",
+        )
+        default_slot_crops = ["rice", "soybean", "maize"]
+        default_slot_starts = [6, 10, 1]
+        default_slot_ends = [9, 12, 4]
+        crop_keys_list = list(CROP_DB.keys())
 
-    # Detailed evidence for each rotation
-    st.markdown("#### 📋 Evidence & Explanation")
-    for key, rot in ROTATIONS.items():
-        result = rot_results[key]
-        with st.expander(f"{rot.name} — Score: {result['total_score']:.1f}/100"):
-            for ev_line in result["evidence"]:
-                st.markdown(f"- {ev_line}")
+        built_slots = []
+        slot_cols = st.columns(n_custom_slots)
+        for idx, scol in enumerate(slot_cols):
+            with scol:
+                st.markdown(f"**Crop {idx + 1}**")
+                ck = scol.selectbox(
+                    "Crop",
+                    crop_keys_list,
+                    index=crop_keys_list.index(default_slot_crops[idx]),
+                    format_func=lambda k: CROP_DB[k].name,
+                    key=f"cust_crop_{idx}",
+                )
+                sm = scol.selectbox(
+                    "Start month",
+                    list(range(1, 13)),
+                    index=default_slot_starts[idx] - 1,
+                    format_func=lambda m: month_names[m - 1],
+                    key=f"cust_start_{idx}",
+                )
+                em = scol.selectbox(
+                    "End month",
+                    list(range(1, 13)),
+                    index=default_slot_ends[idx] - 1,
+                    format_func=lambda m: month_names[m - 1],
+                    key=f"cust_end_{idx}",
+                )
+                built_slots.append(RotationSlot(ck, sm, em, label=CROP_DB[ck].name))
 
-            # Sub-score details
-            st.markdown("**Sub-score details:**")
-            for cat_key, (score, detail) in result["sub_scores"].items():
-                st.markdown(f"- **{WEIGHT_LABELS[cat_key]}**: {score}/100")
+        used_months = [m for s in built_slots for m in s.months]
+        if len(used_months) != len(set(used_months)):
+            st.warning("Selected crop windows overlap in one or more months.")
+
+        bcol1, bcol2 = st.columns(2)
+        if bcol1.button("Add Custom Rotation", key="add_custom_btn", use_container_width=True):
+            auto_label = " → ".join(CROP_DB[s.crop_key].name.split(" (")[0] for s in built_slots)
+            final_name = (custom_name_input.strip() or f"{auto_label} [Custom]")
+            existing_names = (
+                {r.name for r in ROTATIONS.values()}
+                | {r.name for r in autogen_rotations.values()}
+                | {r.name for r in st.session_state["custom_rotations"].values()}
+            )
+            if final_name in existing_names:
+                final_name = f"{final_name} ({len(st.session_state['custom_rotations']) + 1})"
+            ckey = f"custom_{len(st.session_state['custom_rotations']) + 1}_{len(built_slots)}"
+            while ckey in st.session_state["custom_rotations"]:
+                ckey = f"{ckey}_x"
+            st.session_state["custom_rotations"][ckey] = Rotation(
+                name=final_name,
+                description="User-defined custom rotation.",
+                slots=built_slots,
+            )
+            if "compare_select" in st.session_state:
+                st.session_state["compare_select"] = list(
+                    dict.fromkeys([final_name] + st.session_state["compare_select"])
+                )
+            st.success(f"Added custom rotation: {final_name}")
+
+        if st.session_state["custom_rotations"]:
+            if bcol2.button("🗑️ Clear Custom Rotations", key="clear_custom_btn", use_container_width=True):
+                st.session_state["custom_rotations"] = {}
+                st.rerun()
+            st.caption(
+                "Saved custom rotations: "
+                + ", ".join(r.name for r in st.session_state["custom_rotations"].values())
+            )
+
+    # --- Assemble unique rotation pool ---
+    active_rotations = {}
+    curated_2sigs = set()
+    curated_3sigs = set()
+
+    if include_curated:
+        for k, rot in ROTATIONS.items():
+            active_rotations[k] = rot
+            if len(rot.slots) == 2:
+                curated_2sigs.add(tuple(sorted(s.crop_key for s in rot.slots)))
+            elif len(rot.slots) == 3:
+                curated_3sigs.add(tuple(s.crop_key for s in rot.slots))
+
+    for k, rot in st.session_state["custom_rotations"].items():
+        active_rotations[k] = rot
+
+    if include_autogen:
+        for k, rot in autogen_rotations.items():
+            if len(rot.slots) == 2 and tuple(sorted(s.crop_key for s in rot.slots)) in curated_2sigs:
+                continue
+            if len(rot.slots) == 3 and tuple(s.crop_key for s in rot.slots) in curated_3sigs:
+                continue
+            active_rotations[k] = rot
+
+    slot_cache = {}
+    rot_results_by_name = {}
+    rot_obj_by_name = {}
+    ranking_df = pd.DataFrame()
+    filtered_df = pd.DataFrame()
+    filtered_names = []
+    selected_names = []
+
+    if not active_rotations:
+        st.warning("Select curated rotations, auto-generated combinations, or add a custom rotation.")
+    else:
+        ranking_df = compare_rotations(active_rotations, df, weights_norm, slot_cache=slot_cache)
+        for rot in active_rotations.values():
+            rot_obj_by_name[rot.name] = rot
+            rot_results_by_name[rot.name] = score_rotation(rot, df, weights_norm, slot_cache=slot_cache)
+
+        # --- Interactive Filters ---
+        st.markdown("#### 🔍 Filter Ranked Combinations")
+        f1, f2, f3, f4 = st.columns(4)
+        sys_len = f1.radio("System length", ["All", "2 crops/yr", "3 crops/yr"], key="flt_len")
+        req_legume = f2.checkbox("Require N-fixing legume", value=False, key="flt_legume")
+        min_families = f3.slider("Min crop families", 1, 3, 1, key="flt_fams")
+        irr_ceil = max(int(ranking_df["Est. Irrigation (mm)"].max()), 100)
+        irr_ceil = ((irr_ceil + 49) // 50) * 50  # align cleanly to step=50
+        prev_ceil = st.session_state.get("_prev_irr_ceil")
+        if "flt_irr" not in st.session_state or st.session_state["flt_irr"] > irr_ceil or st.session_state["flt_irr"] == prev_ceil:
+            st.session_state["flt_irr"] = irr_ceil
+        st.session_state["_prev_irr_ceil"] = irr_ceil
+        max_irr = f4.slider(
+            "Max est. irrigation (mm/yr)",
+            0, irr_ceil, step=50, key="flt_irr",
+        )
+
+        fc1, fc2 = st.columns(2)
+        must_crops = fc1.multiselect(
+            "Must include crops",
+            list(CROP_DB.keys()),
+            format_func=lambda k: CROP_DB[k].name,
+            key="flt_must",
+        )
+        ban_crops = fc2.multiselect(
+            "Exclude crops",
+            list(CROP_DB.keys()),
+            format_func=lambda k: CROP_DB[k].name,
+            key="flt_ban",
+        )
+
+        mask = pd.Series(True, index=ranking_df.index)
+        if sys_len == "2 crops/yr":
+            mask &= ranking_df["Crops/yr"] == 2
+        elif sys_len == "3 crops/yr":
+            mask &= ranking_df["Crops/yr"] == 3
+        if req_legume:
+            mask &= ranking_df["N-Fix"] == "Yes"
+        mask &= ranking_df["Families"] >= min_families
+        mask &= ranking_df["Est. Irrigation (mm)"] <= max_irr
+        if must_crops:
+            must_set = set(must_crops)
+            mask &= ranking_df["Rotation"].apply(
+                lambda n: must_set.issubset({s.crop_key for s in rot_obj_by_name[n].slots})
+            )
+        if ban_crops:
+            ban_set = set(ban_crops)
+            mask &= ranking_df["Rotation"].apply(
+                lambda n: ban_set.isdisjoint({s.crop_key for s in rot_obj_by_name[n].slots})
+            )
+
+        filtered_df = ranking_df[mask]
+        filtered_names = list(filtered_df["Rotation"])
+        st.caption(f"Showing **{len(filtered_df)}** of **{len(ranking_df)}** combinations.")
+
+        st.dataframe(
+            filtered_df,
+            use_container_width=True,
+            column_config={
+                "Total Score": st.column_config.ProgressColumn(
+                    "Total Score", min_value=0, max_value=100, format="%.1f"
+                ),
+                "Est. Irrigation (mm)": st.column_config.NumberColumn(
+                    "Est. Irrigation (mm)", format="%d mm"
+                ),
+            },
+        )
+
+        if filtered_df.empty:
+            st.info("No combinations match the current filters. Relax a filter above to compare strategies.")
+        else:
+            # --- Stacked Weighted Contribution Bar Chart ---
+            st.markdown("#### 📊 Weighted Score Breakdown (Top Filtered Combinations)")
+            top_n = min(12, len(filtered_df))
+            top_names = list(filtered_df["Rotation"].iloc[:top_n])
+            fig_contrib = go.Figure()
+            for cat_key, cat_label in WEIGHT_LABELS.items():
+                fig_contrib.add_trace(go.Bar(
+                    name=cat_label,
+                    y=top_names,
+                    x=[
+                        round(rot_results_by_name[name]["sub_scores"][cat_key][0] * weights_norm[cat_key], 1)
+                        for name in top_names
+                    ],
+                    orientation="h",
+                ))
+            fig_contrib.update_layout(
+                barmode="stack",
+                yaxis=dict(autorange="reversed"),
+                xaxis_title="Weighted points contributing to Total Score",
+                height=max(300, 32 * top_n + 120),
+                template="plotly_white",
+                title=f"Top {top_n} Combinations — Contribution by Priority",
+            )
+            st.plotly_chart(fig_contrib, use_container_width=True)
+
+            # --- Head-to-Head Multiselect for Radar & Evidence ---
+            default_cmp = filtered_names[:min(4, len(filtered_names))]
+            if "compare_select" not in st.session_state:
+                st.session_state["compare_select"] = default_cmp
+            else:
+                valid_cmp = [x for x in st.session_state["compare_select"] if x in filtered_names]
+                st.session_state["compare_select"] = valid_cmp if valid_cmp else default_cmp
+
+            st.markdown("#### 🎯 Head-to-Head Comparison")
+            selected_names = st.multiselect(
+                "Select combinations to overlay on the Radar Chart & inspect evidence",
+                options=filtered_names,
+                key="compare_select",
+            )
+
+            categories = list(WEIGHT_LABELS.values())
+            fig_radar = go.Figure()
+            for name in selected_names:
+                result = rot_results_by_name[name]
+                values = [result["sub_scores"][k][0] for k in WEIGHT_LABELS]
+                values.append(values[0])  # close the polygon
+                fig_radar.add_trace(go.Scatterpolar(
+                    r=values,
+                    theta=categories + [categories[0]],
+                    name=name,
+                    fill="toself",
+                    opacity=0.55,
+                ))
+            fig_radar.update_layout(
+                polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
+                height=450, template="plotly_white",
+                title="Rotation Sub-scores (0–100)",
+            )
+            st.plotly_chart(fig_radar, use_container_width=True)
+
+            # Detailed evidence for selected combinations
+            st.markdown("#### 📋 Evidence & Explanation")
+            rank_lookup = {row["Rotation"]: idx for idx, row in filtered_df.iterrows()}
+            for name in selected_names:
+                result = rot_results_by_name[name]
+                rank_num = rank_lookup.get(name, "?")
+                with st.expander(f"#{rank_num} {name} — Score: {result['total_score']:.1f}/100"):
+                    for ev_line in result["evidence"]:
+                        st.markdown(f"- {ev_line}")
+
+                    st.markdown("**Sub-score details:**")
+                    for cat_key, (score, _) in result["sub_scores"].items():
+                        st.markdown(f"- **{WEIGHT_LABELS[cat_key]}**: {score}/100")
+
+                    st.markdown("**Per-crop climate & water breakdown:**")
+                    water_det = result["sub_scores"]["water_saving"][1]
+                    for slot_label, fit in result["sub_scores"]["climate_fit"][1].items():
+                        w_note = water_det.get(slot_label, "")
+                        st.markdown(
+                            f"- *{slot_label}*: climate fit **{fit['overall']}/100** "
+                            f"(temp {fit['temp_score']}, rain {fit['water_score']}, dry-spell {fit['dry_spell_score']})"
+                            + (f" — {w_note}" if w_note else "")
+                        )
 
 
 # ---------------------------------------------------------------------------
@@ -503,46 +821,57 @@ with tab_sensitivity:
         "as one priority weight is swept from 0% to 100% (while the others adjust proportionally)."
     )
 
-    vary = st.selectbox(
-        "Vary which priority?",
-        list(WEIGHT_LABELS.keys()),
-        format_func=lambda k: WEIGHT_LABELS[k],
-    )
+    if ranking_df.empty:
+        st.info("Enable or add at least one rotation in the Scoring & Ranking tab.")
+    else:
+        vary = st.selectbox(
+            "Vary which priority?",
+            list(WEIGHT_LABELS.keys()),
+            format_func=lambda k: WEIGHT_LABELS[k],
+        )
 
-    sens_df = sensitivity_analysis(ROTATIONS, df, weights_norm, vary, steps=11)
+        # Plot head-to-head picks (or top 6 filtered) plus baseline to keep chart readable
+        baseline_names = [r.name for r in active_rotations.values() if r.is_baseline]
+        base_pick = selected_names if selected_names else list(ranking_df["Rotation"].iloc[:6])
+        sens_names = list(dict.fromkeys(base_pick + baseline_names))[:8]
+        sens_pool = {k: r for k, r in active_rotations.items() if r.name in sens_names}
 
-    fig_sens = px.line(
-        sens_df, x="weight_value", y="total_score", color="rotation",
-        labels={
-            "weight_value": f"{WEIGHT_LABELS[vary]} weight",
-            "total_score": "Total Score",
-            "rotation": "Rotation",
-        },
-        title=f"Sensitivity: Rankings vs {WEIGHT_LABELS[vary]} weight",
-        template="plotly_white",
-    )
-    fig_sens.update_layout(height=400)
-    st.plotly_chart(fig_sens, use_container_width=True)
+        sens_df = sensitivity_analysis(
+            sens_pool, df, weights_norm, vary, steps=11, slot_cache=slot_cache,
+        )
 
-    # Confidence note
-    scores_sorted = ranking_df["Total Score"].values
-    if len(scores_sorted) >= 2:
-        gap = scores_sorted[0] - scores_sorted[1]
-        if gap < 5:
-            st.warning(
-                f"⚠️ **Low confidence**: The top two rotations are only {gap:.1f} points apart. "
-                "Small changes in weights or local conditions could flip the ranking. "
-                "Consider field trials before committing."
-            )
-        elif gap < 15:
-            st.info(
-                f"ℹ️ The top rotation leads by {gap:.1f} points — a moderate margin. "
-                "Verify with local data."
-            )
-        else:
-            st.success(
-                f"✅ The top rotation leads by {gap:.1f} points — a strong margin."
-            )
+        fig_sens = px.line(
+            sens_df, x="weight_value", y="total_score", color="rotation",
+            labels={
+                "weight_value": f"{WEIGHT_LABELS[vary]} weight",
+                "total_score": "Total Score",
+                "rotation": "Rotation",
+            },
+            title=f"Sensitivity (Selected / Top {len(sens_pool)}): Rankings vs {WEIGHT_LABELS[vary]} weight",
+            template="plotly_white",
+        )
+        fig_sens.update_layout(height=400)
+        st.plotly_chart(fig_sens, use_container_width=True)
+
+        # Confidence note across full active ranking
+        scores_sorted = ranking_df["Total Score"].values
+        if len(scores_sorted) >= 2:
+            gap = scores_sorted[0] - scores_sorted[1]
+            if gap < 5:
+                st.warning(
+                    f"⚠️ **Low confidence**: The top two rotations are only {gap:.1f} points apart. "
+                    "Small changes in weights or local conditions could flip the ranking. "
+                    "Consider field trials before committing."
+                )
+            elif gap < 15:
+                st.info(
+                    f"ℹ️ The top rotation leads by {gap:.1f} points — a moderate margin. "
+                    "Verify with local data."
+                )
+            else:
+                st.success(
+                    f"✅ The top rotation leads by {gap:.1f} points — a strong margin."
+                )
 
 
 # ---------------------------------------------------------------------------

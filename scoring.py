@@ -38,17 +38,27 @@ WEIGHT_LABELS = {
 # Sub-score functions
 # ---------------------------------------------------------------------------
 
-def score_climate_fit(rotation: Rotation, df: pd.DataFrame) -> Tuple[float, Dict]:
+def score_climate_fit(
+    rotation: Rotation,
+    df: pd.DataFrame,
+    slot_cache: Optional[Dict] = None,
+) -> Tuple[float, Dict]:
     """
     Average climate-fit score across all slots in the rotation.
     """
     slot_scores = {}
     for slot in rotation.slots:
         label = slot.label or slot.crop.name
-        fit = crop_climate_fit(df, slot.crop, slot.start_month, slot.end_month)
+        cache_key = ("fit", slot.crop_key, slot.start_month, slot.end_month)
+        if slot_cache is not None and cache_key in slot_cache:
+            fit = slot_cache[cache_key]
+        else:
+            fit = crop_climate_fit(df, slot.crop, slot.start_month, slot.end_month)
+            if slot_cache is not None:
+                slot_cache[cache_key] = fit
         slot_scores[label] = fit
     avg = np.mean([s["overall"] for s in slot_scores.values()])
-    return round(avg, 1), slot_scores
+    return round(float(avg), 1), slot_scores
 
 
 EFFECTIVE_RAIN_FRACTION = 0.8   # share of rainfall usable by the crop (FAO rule of thumb)
@@ -66,7 +76,11 @@ def _season_rain(df: pd.DataFrame, start_month: int, end_month: int) -> float:
     return float(s.groupby(season_year)["PRECTOTCORR"].sum().median())
 
 
-def score_water_saving(rotation: Rotation, df: pd.DataFrame) -> Tuple[float, Dict]:
+def score_water_saving(
+    rotation: Rotation,
+    df: pd.DataFrame,
+    slot_cache: Optional[Dict] = None,
+) -> Tuple[float, Dict]:
     """
     Score based on estimated irrigation demand (lower = better):
         irrigation = max(0, crop water need − 0.8 × median seasonal rainfall)
@@ -76,7 +90,13 @@ def score_water_saving(rotation: Rotation, df: pd.DataFrame) -> Tuple[float, Dic
     total_irr = 0.0
     for slot in rotation.slots:
         need = float(np.mean(slot.crop.water_need_mm))
-        rain = _season_rain(df, slot.start_month, slot.end_month)
+        rain_key = ("rain", slot.start_month, slot.end_month)
+        if slot_cache is not None and rain_key in slot_cache:
+            rain = slot_cache[rain_key]
+        else:
+            rain = _season_rain(df, slot.start_month, slot.end_month)
+            if slot_cache is not None:
+                slot_cache[rain_key] = rain
         irr = max(0.0, need - EFFECTIVE_RAIN_FRACTION * rain)
         total_irr += irr
         detail[slot.label or slot.crop.name] = (
@@ -84,7 +104,8 @@ def score_water_saving(rotation: Rotation, df: pd.DataFrame) -> Tuple[float, Dic
         )
     score = max(0, min(100, (1 - total_irr / IRRIGATION_WORST_MM) * 100))
     detail["total_irrigation_mm"] = f"{total_irr:.0f} mm"
-    return round(score, 1), detail
+    detail["total_irrigation_val"] = int(round(total_irr))
+    return round(float(score), 1), detail
 
 
 def score_soil_health(rotation: Rotation) -> Tuple[float, Dict]:
@@ -149,6 +170,7 @@ def score_rotation(
     rotation: Rotation,
     df: pd.DataFrame,
     weights: Optional[Dict[str, float]] = None,
+    slot_cache: Optional[Dict] = None,
 ) -> Dict:
     """
     Compute the full weighted score for a rotation.
@@ -166,11 +188,11 @@ def score_rotation(
 
     # Normalize weights
     w_sum = sum(weights.values())
-    w = {k: v / w_sum for k, v in weights.items()}
+    w = {k: v / w_sum for k, v in weights.items()} if w_sum > 0 else DEFAULT_WEIGHTS
 
     # Compute sub-scores
-    climate_s, climate_d = score_climate_fit(rotation, df)
-    water_s, water_d = score_water_saving(rotation, df)
+    climate_s, climate_d = score_climate_fit(rotation, df, slot_cache=slot_cache)
+    water_s, water_d = score_water_saving(rotation, df, slot_cache=slot_cache)
     soil_s, soil_d = score_soil_health(rotation)
     pest_s, pest_d = score_pest_break(rotation)
     income_s, income_d = score_income(rotation)
@@ -190,7 +212,7 @@ def score_rotation(
 
     return {
         "rotation_name": rotation.name,
-        "total_score": round(total, 1),
+        "total_score": round(float(total), 1),
         "sub_scores": sub_scores,
         "weights_used": w,
         "evidence": evidence,
@@ -270,23 +292,40 @@ def compare_rotations(
     rotations: Dict[str, Rotation],
     df: pd.DataFrame,
     weights: Optional[Dict[str, float]] = None,
+    slot_cache: Optional[Dict] = None,
 ) -> pd.DataFrame:
     """
     Score and rank all rotations.
 
     Returns a DataFrame sorted by total_score descending.
     """
+    if slot_cache is None:
+        slot_cache = {}
     results = []
     for key, rot in rotations.items():
-        result = score_rotation(rot, df, weights)
+        result = score_rotation(rot, df, weights, slot_cache=slot_cache)
+        irr_val = result["sub_scores"]["water_saving"][1].get("total_irrigation_val", 0)
         row = {
             "Rotation": result["rotation_name"],
             "Total Score": result["total_score"],
             "Baseline": "⭐" if rot.is_baseline else "",
+            "Crops/yr": len(rot.slots),
+            "Families": rot.unique_families,
+            "N-Fix": "Yes" if rot.has_legume else "No",
+            "Bare Months": len(rot.bare_months),
+            "Est. Irrigation (mm)": irr_val,
         }
         for cat, (score, _) in result["sub_scores"].items():
             row[WEIGHT_LABELS.get(cat, cat)] = score
         results.append(row)
+
+    if not results:
+        cols = [
+            "Rotation", "Total Score", "Baseline", "Crops/yr",
+            "Families", "N-Fix", "Bare Months", "Est. Irrigation (mm)",
+            *WEIGHT_LABELS.values(),
+        ]
+        return pd.DataFrame(columns=cols)
 
     ranking = pd.DataFrame(results).sort_values("Total Score", ascending=False).reset_index(drop=True)
     ranking.index = ranking.index + 1  # 1-based rank
@@ -300,17 +339,20 @@ def sensitivity_analysis(
     base_weights: Dict[str, float],
     vary_key: str,
     steps: int = 11,
+    slot_cache: Optional[Dict] = None,
 ) -> pd.DataFrame:
     """
     Show how rankings change as one weight goes from 0 to 1.
 
     Returns a DataFrame with columns: weight_value, rotation, total_score.
     """
+    if slot_cache is None:
+        slot_cache = {}
     # Sub-scores depend only on climate and crop traits, not weights; compute once per rotation.
     w_base = base_weights if sum(base_weights.values()) > 0 else DEFAULT_WEIGHTS
     precomputed = {}
     for rot in rotations.values():
-        res = score_rotation(rot, df, w_base)
+        res = score_rotation(rot, df, w_base, slot_cache=slot_cache)
         precomputed[rot.name] = {k: score for k, (score, _) in res["sub_scores"].items()}
 
     rows = []
