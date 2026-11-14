@@ -7,7 +7,7 @@ Values are simplified for a decision-support demo — NOT authoritative agronomi
 """
 
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 
 # ---------------------------------------------------------------------------
 # Crop trait data
@@ -75,7 +75,7 @@ CROP_DB: Dict[str, CropTraits] = {
         nitrogen_fixing=False,
         rooting_depth="deep",
         market_value="medium",
-        typical_season="Feb–Jun or Aug–Dec",
+        typical_season="Dec–May (dry) or Aug–Nov",
         description="Deep-rooted cereal; tolerates drier conditions than rice, but pollen viability drops above 38 °C.",
         color="#F39C12",
         source_note="FAO I&D 24/56 (500–800 mm); EcoCrop",
@@ -90,7 +90,7 @@ CROP_DB: Dict[str, CropTraits] = {
         nitrogen_fixing=True,
         rooting_depth="medium",
         market_value="high",
-        typical_season="Feb–May or Aug–Nov",
+        typical_season="Oct–Dec or Jan–Apr",
         description="Fixes atmospheric nitrogen and breaks cereal pest cycles; sensitive to waterlogging.",
         color="#27AE60",
         source_note="FAO I&D 24/56 (450–700 mm); EcoCrop",
@@ -105,7 +105,7 @@ CROP_DB: Dict[str, CropTraits] = {
         nitrogen_fixing=True,
         rooting_depth="medium",
         market_value="high",
-        typical_season="Mar–May (short gap crop)",
+        typical_season="Oct–Jan or Feb–May (gap)",
         description="Chilling-sensitive quick legume with a 0.5–1.0 m taproot; fits short gaps on residual moisture.",
         color="#1ABC9C",
         source_note="WorldVeg / FAO EcoCrop (base ~15 °C, taproot)",
@@ -120,7 +120,7 @@ CROP_DB: Dict[str, CropTraits] = {
         nitrogen_fixing=False,
         rooting_depth="medium",
         market_value="medium",
-        typical_season="Year-round where warm",
+        typical_season="Dec–Apr (dry/cool)",
         description="Dense canopy protects soil from erosion; storage root bulking slows above 30 °C.",
         color="#8E44AD",
         source_note="FAO I&D 24 (400–675 mm); EcoCrop (<30 °C bulking)",
@@ -135,7 +135,7 @@ CROP_DB: Dict[str, CropTraits] = {
         nitrogen_fixing=True,
         rooting_depth="medium",
         market_value="high",
-        typical_season="Feb–Jun",
+        typical_season="Jan–May (dry season)",
         description="Drought-hardy nitrogen fixer; needs loose, well-drained soil for pegging; heat >37 °C cuts pod set.",
         color="#D4AC0D",
         source_note="FAO I&D 24/56 (500–700 mm); ICRISAT",
@@ -150,7 +150,7 @@ CROP_DB: Dict[str, CropTraits] = {
         nitrogen_fixing=False,
         rooting_depth="shallow",
         market_value="high",
-        typical_season="Oct–Mar (cooler months)",
+        typical_season="Oct–Mar (cool months)",
         description="Fast-maturing leafy brassicas (e.g., mustard greens, cabbage family); high value per ha, needs steady moisture.",
         color="#E74C3C",
         source_note="FAO CROPWAT / WorldVeg (Brassicaceae)",
@@ -250,7 +250,7 @@ ROTATIONS: Dict[str, Rotation] = {
         slots=[
             RotationSlot("rice", start_month=6, end_month=9, label="Wet-season rice"),
             RotationSlot("soybean", start_month=10, end_month=12, label="Soybean"),
-            RotationSlot("vegetables", start_month=1, end_month=3, label="Leafy brassicas"),
+            RotationSlot("vegetables", start_month=1, end_month=2, label="Leafy brassicas"),
         ],
     ),
     "rice_mung_maize": Rotation(
@@ -295,6 +295,16 @@ _SHORT_NAMES = {
 }
 
 
+def _crop_window(crop_key: str, base_start: int, max_end: int) -> Tuple[int, int]:
+    """Fit a slot window to the crop's season_days[1] within [base_start, max_end]."""
+    span_months = ((max_end - base_start) % 12) + 1
+    max_days = CROP_DB[crop_key].season_days[1]
+    desired = max(2, min(5, round(max_days / 30)))
+    used = min(desired, span_months)
+    end_m = ((base_start - 1 + used - 1) % 12) + 1
+    return base_start, end_m
+
+
 def generate_rotation_combinations(
     wet_crops: List[str],
     gap_crops: List[str],
@@ -306,35 +316,41 @@ def generate_rotation_combinations(
     Generate valid 2-crop (Wet Jun–Oct + Dry Dec–Mar / Jan–Apr) and
     3-crop (Wet Jun–Sep + Cool/Gap Oct–Dec + Dry Jan–Apr) combinations.
 
+    Slot month windows are sized to each crop's `season_days` in CROP_DB.
     Skips adjacent identical crop keys (while allowing `rice` + `rice_dry`).
     """
     combos: Dict[str, Rotation] = {}
 
     if include_2crop:
         for w in wet_crops:
+            w_start, w_end = _crop_window(w, 6, 10)
             for d in dry_crops:
                 if w == d:
                     continue
-                d_start, d_end = (12, 3) if d == "rice_dry" else (1, 4)
+                d_base, d_max = (12, 3) if d == "rice_dry" else (1, 4)
+                d_start, d_end = _crop_window(d, d_base, d_max)
                 key = f"gen_2_{w}_{d}"
                 name = f"{_SHORT_NAMES.get(w, w)} → {_SHORT_NAMES.get(d, d)} [2-crop]"
                 combos[key] = Rotation(
                     name=name,
-                    description="Auto-generated 2-crop combination (Wet Jun–Oct, Dry Dec–Mar/Jan–Apr).",
+                    description="Auto-generated 2-crop combination sized to crop cycle lengths.",
                     slots=[
-                        RotationSlot(w, 6, 10, label=f"Wet: {_SHORT_NAMES.get(w, w)}"),
+                        RotationSlot(w, w_start, w_end, label=f"Wet: {_SHORT_NAMES.get(w, w)}"),
                         RotationSlot(d, d_start, d_end, label=f"Dry: {_SHORT_NAMES.get(d, d)}"),
                     ],
                 )
 
     if include_3crop:
         for w in wet_crops:
+            w_start, w_end = _crop_window(w, 6, 9)
             for g in gap_crops:
                 if w == g:
                     continue
+                g_start, g_end = _crop_window(g, 10, 12)
                 for d in dry_crops:
                     if g == d or d == w:
                         continue
+                    d_start, d_end = _crop_window(d, 1, 4)
                     key = f"gen_3_{w}_{g}_{d}"
                     name = (
                         f"{_SHORT_NAMES.get(w, w)} → {_SHORT_NAMES.get(g, g)} "
@@ -342,11 +358,11 @@ def generate_rotation_combinations(
                     )
                     combos[key] = Rotation(
                         name=name,
-                        description="Auto-generated 3-crop combination (Jun–Sep, Oct–Dec, Jan–Apr).",
+                        description="Auto-generated 3-crop combination sized to crop cycle lengths.",
                         slots=[
-                            RotationSlot(w, 6, 9, label=f"Wet: {_SHORT_NAMES.get(w, w)}"),
-                            RotationSlot(g, 10, 12, label=f"Gap: {_SHORT_NAMES.get(g, g)}"),
-                            RotationSlot(d, 1, 4, label=f"Dry: {_SHORT_NAMES.get(d, d)}"),
+                            RotationSlot(w, w_start, w_end, label=f"Wet: {_SHORT_NAMES.get(w, w)}"),
+                            RotationSlot(g, g_start, g_end, label=f"Gap: {_SHORT_NAMES.get(g, g)}"),
+                            RotationSlot(d, d_start, d_end, label=f"Dry: {_SHORT_NAMES.get(d, d)}"),
                         ],
                     )
 
@@ -362,6 +378,7 @@ def get_crop_table_df():
             "Crop": c.name,
             "Family": c.family,
             "Season (days)": f"{c.season_days[0]}–{c.season_days[1]}",
+            "Typical season": c.typical_season,
             "Temp range (°C)": f"{c.temp_min}–{c.temp_max}",
             "Optimal (°C)": f"{c.temp_opt_low}–{c.temp_opt_high}",
             "Water (mm)": f"{c.water_need_mm[0]}–{c.water_need_mm[1]}",

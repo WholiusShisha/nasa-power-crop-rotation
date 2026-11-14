@@ -274,8 +274,28 @@ def crop_climate_fit(
         dry_penalty = max(0, (avg_dry - 7) * 3.0)
     dry_spell_score = max(0, 100 - dry_penalty)
 
+    # --- Duration check against crop season_days ---
+    n_months = ((end_month - start_month) % 12) + 1
+    slot_days = round(n_months * 30.4)
+    min_d, max_d = crop_traits.season_days
+    duration_penalty = 0.0
+    duration_warning = ""
+    if slot_days < min_d * 0.85:
+        duration_penalty = min(30.0, max(10.0, (min_d - slot_days) * 0.5))
+        duration_warning = (
+            f"Window (~{slot_days}d) is shorter than crop maturity ({min_d}–{max_d}d)."
+        )
+    elif slot_days > max_d * 1.35:
+        duration_penalty = min(15.0, (slot_days - max_d) * 0.2)
+        duration_warning = (
+            f"Window (~{slot_days}d) far exceeds crop cycle ({min_d}–{max_d}d)."
+        )
+
     # --- Overall ---
-    overall = (temp_score * 0.35 + water_score * 0.40 + dry_spell_score * 0.25)
+    overall = max(
+        0.0,
+        (temp_score * 0.35 + water_score * 0.40 + dry_spell_score * 0.25) - duration_penalty,
+    )
 
     return {
         "overall": round(overall, 1),
@@ -289,6 +309,9 @@ def crop_climate_fit(
             "pct_too_cold": round(too_cold, 1),
             "median_rain_mm": round(float(median_rain), 0),
             "avg_max_dry_spell": round(avg_dry, 1),
+            "slot_days": slot_days,
+            "season_days_range": crop_traits.season_days,
+            "duration_warning": duration_warning,
         },
     }
 

@@ -135,18 +135,35 @@ def score_soil_health(rotation: Rotation) -> Tuple[float, Dict]:
 def score_pest_break(rotation: Rotation) -> Tuple[float, Dict]:
     """
     More distinct crop families = better pest/disease cycle break.
+    Penalizes consecutive slots in the annual cycle sharing the same family.
     """
     families = {slot.crop.family for slot in rotation.slots}
     n_fam = len(families)
     n_slots = len(rotation.slots)
-    # 1 family = 20, 2 = 60, 3+ = 90+
-    score = min(100, 20 + (n_fam - 1) * 35)
+
+    # Check consecutive same-family transitions in chronological annual cycle
+    ordered = sorted(rotation.slots, key=lambda s: s.start_month)
+    adj_same_pairs = []
+    if len(ordered) >= 2:
+        for i in range(len(ordered)):
+            cur_slot = ordered[i]
+            nxt_slot = ordered[(i + 1) % len(ordered)]
+            if cur_slot.crop.family == nxt_slot.crop.family:
+                c_name = cur_slot.label or cur_slot.crop.name
+                n_name = nxt_slot.label or nxt_slot.crop.name
+                adj_same_pairs.append(f"{c_name} → {n_name} ({cur_slot.crop.family})")
+
+    # 1 family = 20, 2 = 55, 3+ = 90+, minus 15 per consecutive same-family bridge
+    base_score = min(100, 20 + (n_fam - 1) * 35)
+    score = max(0, base_score - 15 * len(adj_same_pairs))
     detail = {
         "unique_families": n_fam,
         "families": sorted(families),
         "slots": n_slots,
+        "adjacent_same_family": len(adj_same_pairs) > 0,
+        "adjacent_same_family_pairs": adj_same_pairs,
     }
-    return round(score, 1), detail
+    return round(float(score), 1), detail
 
 
 def score_income(rotation: Rotation) -> Tuple[float, Dict]:
@@ -239,7 +256,7 @@ def _build_evidence(rotation: Rotation, sub_scores: Dict) -> List[str]:
         f"💧 Estimated irrigation needed beyond rainfall: {detail.get('total_irrigation_mm', '?')}/yr "
         f"— score {ws}/100. (Based on POWER seasonal rainfall; assumes 80% is usable.)"
     )
-    # Flag rain-fed mismatch in any season
+    # Flag rain-fed mismatch, heat, or cycle-duration mismatch in any season
     for label, fit in sub_scores["climate_fit"][1].items():
         if fit.get("water_score", 100) < 40:
             ev.append(
@@ -248,6 +265,9 @@ def _build_evidence(rotation: Rotation, sub_scores: Dict) -> List[str]:
             )
         if fit.get("detail", {}).get("pct_too_hot", 0) > 5:
             ev.append(f"🔥 {label}: {fit['detail']['pct_too_hot']:.0f}% of days exceed the crop's heat limit.")
+        dur_warn = fit.get("detail", {}).get("duration_warning")
+        if dur_warn:
+            ev.append(f"⏱️ {label}: {dur_warn}")
 
     # Soil health
     ss = sub_scores["soil_health"][0]
@@ -270,6 +290,9 @@ def _build_evidence(rotation: Rotation, sub_scores: Dict) -> List[str]:
         ev.append(f"⚠️ Moderate pest-cycle break: 2 families ({', '.join(fams)}).")
     else:
         ev.append(f"❌ No family diversity — same pests and diseases may persist.")
+    if len(fams) >= 2 and pd_detail.get("adjacent_same_family"):
+        pairs = "; ".join(pd_detail.get("adjacent_same_family_pairs", []))
+        ev.append(f"⚠️ Adjacent slots share a botanical family ({pairs}) — weaker pest break.")
 
     # Income
     inc = sub_scores["income"][0]

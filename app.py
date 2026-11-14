@@ -230,8 +230,20 @@ with tab_overview:
     col3.metric("Mean Solar Radiation", f"{df['ALLSKY_SFC_SW_DWN'].mean():.1f} MJ/m²/day")
     col4.metric("Avg Root-zone Wetness", f"{df['GWETROOT'].mean():.2f}")
 
-    # Temperature chart
+    # Temperature chart with reference rice thresholds from CROP_DB
+    rice_ref = CROP_DB["rice"]
     fig_temp = go.Figure()
+    fig_temp.add_hrect(
+        y0=rice_ref.temp_opt_low, y1=rice_ref.temp_opt_high,
+        fillcolor="rgba(39, 174, 96, 0.08)", line_width=0,
+        annotation_text=f"Rice optimal ({rice_ref.temp_opt_low}–{rice_ref.temp_opt_high} °C)",
+        annotation_position="top left",
+    )
+    fig_temp.add_hline(
+        y=rice_ref.temp_max, line_dash="dot", line_color="#C0392B",
+        annotation_text=f"Rice heat limit ({rice_ref.temp_max} °C)",
+        annotation_position="top right",
+    )
     fig_temp.add_trace(go.Scatter(
         x=month_names, y=monthly["T2M_MAX_mean"],
         name="Max Temp", line=dict(color="#E74C3C", width=2),
@@ -247,7 +259,7 @@ with tab_overview:
         fill="tonexty", fillcolor="rgba(52, 152, 219, 0.1)",
     ))
     fig_temp.update_layout(
-        title="Monthly Temperature (°C)",
+        title="Monthly Temperature (°C) vs Rice Reference Thresholds",
         yaxis_title="Temperature (°C)",
         height=350, template="plotly_white",
     )
@@ -302,10 +314,27 @@ with tab_overview:
 with tab_indicators:
     st.subheader("Long-term Climate Indicators")
 
-    # Compute indicators
-    gs = growing_season_length(df, 10)
-    fr = frost_risk(df, 2)
-    hs = heat_stress(df, 35)
+    ref_crop_key = st.selectbox(
+        "Reference crop thresholds (from Crop Trait Table):",
+        list(CROP_DB.keys()),
+        index=0,
+        format_func=lambda k: CROP_DB[k].name,
+        key="ind_ref_crop",
+    )
+    ref_crop = CROP_DB[ref_crop_key]
+    st.caption(
+        f"Using **{ref_crop.name}** thresholds — "
+        f"Base min (T2M ≥ {ref_crop.temp_min} °C), "
+        f"Cold/chilling risk (T2M_MIN ≤ {ref_crop.temp_min} °C), "
+        f"Optimal (T2M {ref_crop.temp_opt_low}–{ref_crop.temp_opt_high} °C), "
+        f"Heat limit (T2M_MAX ≥ {ref_crop.temp_max} °C), "
+        f"Cycle ({ref_crop.season_days[0]}–{ref_crop.season_days[1]} days)."
+    )
+
+    # Compute indicators using reference crop traits
+    gs = growing_season_length(df, ref_crop.temp_min)
+    fr = frost_risk(df, ref_crop.temp_min)
+    hs = heat_stress(df, ref_crop.temp_max)
     ds = dry_spell_analysis(df)
     wb_monthly = monthly_water_balance(df)
 
@@ -317,11 +346,11 @@ with tab_indicators:
               delta=f"range: {gs_range['p10']:.0f}–{gs_range['p90']:.0f}")
 
     fr_range = indicator_percentile_range(fr["frost_days"])
-    r2.metric("Frost Risk Days/yr", f"{fr_range['median']:.0f}",
+    r2.metric(f"Chilling Days/yr (≤{ref_crop.temp_min}°C)", f"{fr_range['median']:.0f}",
               delta=f"range: {fr_range['p10']:.0f}–{fr_range['p90']:.0f}")
 
     hs_range = indicator_percentile_range(hs["heat_stress_days"])
-    r3.metric("Heat Stress Days/yr", f"{hs_range['median']:.0f}",
+    r3.metric(f"Heat Stress Days/yr (≥{ref_crop.temp_max}°C)", f"{hs_range['median']:.0f}",
               delta=f"range: {hs_range['p10']:.0f}–{hs_range['p90']:.0f}")
 
     ds_range = indicator_percentile_range(ds["max_dry_spell_days"])
@@ -333,7 +362,7 @@ with tab_indicators:
     trend_indicator = st.selectbox("Select indicator to plot:", [
         "Growing season length",
         "Heat stress days",
-        "Frost risk days",
+        "Cold / chilling risk days",
         "Max dry spell length",
         "Annual rainfall",
     ])
@@ -344,7 +373,7 @@ with tab_indicators:
     elif trend_indicator == "Heat stress days":
         trend_data = hs.set_index("year")["heat_stress_days"]
         ylabel = "Days"
-    elif trend_indicator == "Frost risk days":
+    elif trend_indicator == "Cold / chilling risk days":
         trend_data = fr.set_index("year")["frost_days"]
         ylabel = "Days"
     elif trend_indicator == "Max dry spell length":
@@ -515,14 +544,14 @@ with tab_scoring:
             gap_choices = c_gap.multiselect(
                 "Cool / Gap slot (Oct–Dec, 3-crop)",
                 all_crop_keys,
-                default=["soybean", "mung_bean", "sweet_potato", "vegetables"],
+                default=["soybean", "mung_bean", "vegetables"],
                 format_func=lambda k: CROP_DB[k].name,
                 key="gen_gap",
             )
             dry_choices = c_dry.multiselect(
                 "Dry season (Jan–Apr / Dec–Mar)",
                 all_crop_keys,
-                default=["rice_dry", "maize", "mung_bean", "peanut", "vegetables"],
+                default=["rice_dry", "maize", "mung_bean", "sweet_potato", "peanut", "vegetables"],
                 format_func=lambda k: CROP_DB[k].name,
                 key="gen_dry",
             )

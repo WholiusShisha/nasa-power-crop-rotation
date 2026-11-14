@@ -20,9 +20,9 @@ Farmers need a simple way to compare rotations against their local climate recor
    - root-zone soil wetness,
    - the *bare-field erosion window*,
    - trends (linear + Mann-Kendall).
-3. **Scores every crop's climate fit per season** using a transparent rule set: temperature 35 %, water 40 %, dry-spell 25 %. The fit comes from an 8-crop trait table of FAO / extension-guide values.
-4. **Scores rotations on five criteria:** climate fit, water saving (irrigation demand), soil health (N-fixing + soil cover), pest-cycle break (crop-family diversity) and income.
-5. **Lets the farmer set priority weights** with sliders, and re-ranks live.
+3. **Scores every crop's climate fit per season** using a transparent rule set: temperature 35 %, water 40 %, dry-spell 25 %, plus a season-duration check against `season_days`. The traits come from an 8-crop table fact-checked against FAO I&D 24/56, FAO EcoCrop, IRRI, and WorldVeg guidelines (e.g., 35 °C rice flowering sterility limit and Brassicaceae family tagging).
+4. **Scores rotations across 8 curated systems plus auto-generated or custom combinations** on five criteria: climate fit, water saving (irrigation demand beyond 80% of seasonal rain), soil health (N-fixing + bare-month soil cover + root diversity), pest-cycle break (family diversity with consecutive-family penalty), and income.
+5. **Lets the farmer filter combinations and adjust priority presets/sliders**, re-ranking live.
 6. **Explains every ranking.** Each rotation gets evidence bullets, risks, and "needs local validation" notes.
 7. **Shows uncertainty:**
    - P10–P90 ranges across years,
@@ -45,7 +45,7 @@ There is no hidden model. Every number traces back to a POWER indicator or a tra
 - The median longest dry spell is about 40 days, in the Jan–Apr dry season.
 - Rainfall shows no significant trend (Mann-Kendall p = 0.59).
 
-**Ranking with default weights**
+**Initial 4-strategy baseline snapshot (Cần Thơ, pre-combination expansion)**
 
 | Rank | Rotation | Score |
 |---|---|---|
@@ -53,6 +53,8 @@ There is no hidden model. Every number traces back to a POWER indicator or a tra
 | 2 | Rice → Soybean → Vegetables | 71.0 |
 | 3 | Rice → Maize | 54.8 |
 | 4 | Rice → Rice (baseline) | 46.2 |
+
+*(Note: After expanding to 8 curated rotations + interactive combination pools, fact-checking FAO/IRRI thresholds such as rice 35 °C flowering sterility, and adding consecutive same-family penalties, **Rice–Soybean–Leafy Brassicas** (`Poaceae → Fabaceae → Brassicaceae`, 3 distinct families with zero repeated adjacent families) is designed to avoid the same-family `Maize → Rice` transition penalty. Re-run `streamlit run app.py` to view updated live scores.)*
 
 **Why the baseline ranks last:** dry-season rice needs heavy irrigation, because rain covers only a fraction of its water need. It also fixes no nitrogen, leaves no pest break, and leaves a bare-field window in a wet month.
 

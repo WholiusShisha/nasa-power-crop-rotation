@@ -26,23 +26,19 @@ streamlit run app.py
    moisture, solar radiation) from the NASA POWER API for any location.
 2. **Computes** farmer-readable indicators: growing season, frost risk, heat
    stress, water balance, dry spells, soil wetness trends.
-3. **Scores** crop rotation strategies using a weighted, rule-based model
-   against 5 criteria: climate fit, water saving, soil health, pest-cycle
-   break, and income potential.
-4. **Lets the farmer** set priority weights with interactive sliders and
-   see rankings update in real time.
-5. **Shows uncertainty** via percentile ranges, trend analysis (Mann-Kendall),
-   and a climate-change scenario slider (+°C, ±% rainfall).
+3. **Scores** 8 curated Mekong rotations plus auto-generated or custom 2- and 3-crop combinations using a weighted, rule-based model across 5 criteria: climate fit (including cycle-duration match), water saving (irrigation demand vs. seasonal rain), soil health (N-fixing, bare-month cover, root depth), pest-cycle break (family diversity and adjacent-transition checks), and income potential.
+4. **Lets the farmer** pick priority presets or drag sliders, filter combinations live, and inspect per-crop evidence.
+5. **Shows uncertainty** via percentile ranges, trend analysis (Mann-Kendall), and a climate-change scenario slider (+°C, ±% rainfall).
 
 ## Project Structure
 
 | File | Purpose |
 |------|---------|
-| `app.py` | Streamlit frontend — all tabs and visualizations |
-| `power_api.py` | NASA POWER API client with caching |
-| `crops.py` | Crop trait table (8 crops) and rotation definitions (4 strategies) |
-| `indicators.py` | Climate indicator computation and trend analysis |
-| `scoring.py` | Weighted rotation scoring engine with sensitivity analysis |
+| `app.py` | Streamlit frontend — 6-tab dashboard, combination builder, filters |
+| `power_api.py` | NASA POWER API client with Parquet caching |
+| `crops.py` | Fact-checked crop trait table (8 crops), 8 curated rotations, combination generator |
+| `indicators.py` | Climate indicator computation, cycle checks, and trend analysis |
+| `scoring.py` | Slot-cached weighted rotation scoring engine with sensitivity analysis |
 | `requirements.txt` | Python dependencies |
 
 ## Data Source
